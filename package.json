@@ -1,9 +1,0 @@
-{
-    "name": "cicd-gbnt",
-    "description": "Ross the Boss CICD application",
-    "version": "0.0.1",
-    "private": true,
-    "dependencies": {
-        "express": "3.x"
-    }
-}

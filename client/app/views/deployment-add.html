@@ -1,0 +1,11 @@
+<form role="form">
+  <div class="form-group">
+    <label for="title" class="control-label">appName</label>
+    <input ng-model="deployment.appName" class="form-control" id="title" placeholder="Enter the application name" type="text">
+  </div>
+  <div class="form-group">
+    <label for="title" class="control-label">url</label>
+    <input ng-model="deployment.url" class="form-control" id="title" placeholder="Enter the deployment URL" type="text">
+  </div>
+  <input class="btn btn-primary" ng-click="saveDeployment()" value="Save" type="submit">
+</form>
