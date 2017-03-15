@@ -1,0 +1,234 @@
+#!/usr/bin/env groovy
+node{
+// Mark the code checkout 'stage'....
+stage ('Checkout') {
+
+// Get some code from a GitHub repository
+checkout scm
+}
+
+def uploadSpec = ""
+def props = readProperties file: 'project.properties'
+def version = props.version
+def gitRepo = props.repo
+def sonarLinksCI = props.sonarLinksCI
+def githubSonarAuthToken=props.githubSonarAuthToken
+def pomPath = props.pomPath
+def webHomePath = props.webHomePath
+def appName = props.appName
+def artifactoryServer = props.artifactoryServer
+def artifactoryRepo = props.artifactoryRepo
+def artifactorySnapshotRepo = props.artifactorySnapshotRepo
+def serviceBuild= props.serviceBuild
+def webBuild = props.webBuild
+def techLead = props.techLead
+
+  try {
+    //send out build start notification
+    notifyBuild('STARTED')
+
+    //Clean up the workspace
+    step([$class: 'WsCleanup', notFailBuild: true, patterns: [[pattern: '**/*.zip', type: 'INCLUDE'], [pattern: '**/*.jar', type: 'INCLUDE']]])
+
+    echo "${version}"
+    echo "${gitRepo}"
+    echo "${pomPath}"
+    echo "${webHomePath}"
+    echo "Tech Lead: ${techLead}"
+    echo "My branch is: ${env.BRANCH_NAME}"
+    echo "${artifactoryServer}"
+
+    if ("${pomPath}" != "null"){
+      // Mark the services build
+      stage ('Build Services') {
+        configFileProvider([configFile(fileId: '70683d75-2992-45fd-a42d-4eb35d5eb67e', variable: 'mavenSettings')]) {
+          //Maven Services Build
+          def mvnHome = tool 'Latest Maven'
+          sh "${mvnHome}/bin/mvn " + "-s ${mavenSettings} " + "${serviceBuild} " + "${pomPath}"
+        }
+      }
+    }
+
+    if ("${webHomePath}" != "null"){
+      //Mark the web project build
+      stage ('Build Web Projects') {
+
+        //Web Project Build
+        def nodeHome = tool name: 'Latest Node', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'
+        env.PATH = "${nodeHome}/bin:${env.PATH}"
+        sh "${webBuild}"
+      }
+    }
+
+    //Mark openresty build
+    stage ('Build OpenResty Config') {
+      //zip up openresty directory
+      zip dir: 'openresty', glob: '', zipFile: "${appName}-openresty-${version}-SNAPSHOT.zip"
+    }
+
+    if ("${env.BRANCH_NAME}"=="develop") {
+      //Mark the Code Analysis Stage
+      stage ('SonarQube Analysis') {
+        //SonarQube Static Code Analysis
+        def scannerHome = tool name: 'Latest Scanner'; withSonarQubeEnv('SonarqubeProd') {
+        sh "${scannerHome}/bin/sonar-scanner -D sonar.projectVersion=$version -D sonar.links.ci=${sonarLinksCI}"
+        }
+      }
+
+      //Define the artifactory uploadSpec
+      uploadSpec = """{
+      "files": [
+        {
+          "pattern": "*.zip",
+          "target": "${artifactorySnapshotRepo}",
+          "recursive": "false"
+        },
+        {
+          "pattern": "*.jar",
+          "target": "${artifactorySnapshotRepo}",
+          "recursive": "false"
+        }
+      ]
+      }"""
+    }
+
+    else if ("${env.BRANCH_NAME}".startsWith('release') || "${env.BRANCH_NAME}".startsWith('hotfix')){
+      //mark stage artifact transformation
+      stage ('Release Candidate Artifact Transformation') {
+
+      if ("${pomPath}" != "null"){
+        //append all .jar and .zips with RC (release candidate) tag
+        sh 'for file in *.jar ; do mv $file `echo $file | sed \"s/\\(.*\\)\\SNAPSHOT\\.jar/\\1SNAPSHOT_RC\\.jar/\"` ; done'
+
+        // sh 'rename "s/\\.zip$/-SNAPSHOT_RC.zip/" *zip'
+        sh 'for file in *.zip ; do mv $file `echo $file | sed \"s/\\(.*\\)\\.zip/\\1-SNAPSHOT_RC\\.zip/\"` ; done'
+      }
+        //Define the artifactory uploadSpec
+        uploadSpec = """{
+        "files": [
+          {
+            "pattern": "*.zip",
+            "target": "${artifactorySnapshotRepo}",
+            "recursive": "false"
+          },
+          {
+            "pattern": "*.jar",
+            "target": "${artifactorySnapshotRepo}",
+            "recursive": "false"
+          }
+        ]
+        }"""
+      }
+    }
+
+    else if ("${env.BRANCH_NAME}"=="master") {
+      //mark stage artifact transformation
+      stage ('Release Artifact Transformation') {
+
+      //replace SNAPSHOT in all .jar and .zips with RELEASE_$VERSION
+      if ("${pomPath}" != "null"){
+        sh 'for file in *.jar ; do mv $file `echo $file | sed \"s/\\(.*\\)\\SNAPSHOT\\.jar/\\1RELEASE\\.jar/\"` ; done'
+
+      // sh 'rename "s/\\.zip$/-SNAPSHOT_RC.zip/" *zip'
+      sh 'for file in *.zip ; do mv $file `echo $file | sed \"s/\\(.*\\)\\.zip/\\1-RELEASE\\.zip/\"` ; done'
+      }
+
+      uploadSpec = """{
+      "files": [
+        {
+          "pattern": "*.zip",
+          "target": "${artifactoryRepo}",
+          "recursive": "false"
+        },
+        {
+          "pattern": "*.jar",
+          "target": "${artifactoryRepo}",
+          "recursive": "false"
+        }
+      ]
+      }"""
+      }
+    }
+
+    else if ("${env.BRANCH_NAME}".startsWith('PR-')) {
+      //Set github pull request ID to enable sonarqube comments
+      ghprID = "${env.CHANGE_ID}"
+
+      echo "${ghprID}"
+      //Mark SonarQube Preview Analysis
+      stage ('Pull Request SonarQube Preview Analysis') {
+
+      //SonarQube Static Code Analysis in preview mode
+      def scannerHome = tool name: 'Latest Scanner'; withSonarQubeEnv('SonarqubeProd') {
+        sh "${scannerHome}/bin/sonar-scanner -D sonar.projectVersion=${version} -D sonar.analysis.mode=preview -D sonar.github.repository=${gitRepo} -D sonar.github.oauth=${githubSonarAuthToken} -D sonar.github.pullRequest=${ghprID}"
+        }
+      }
+    }
+
+    else {
+      currentBuild.result = 'SUCCESS'
+    }
+  }
+
+  catch (e) {
+    //If there was an exception thrown, the build failed
+    currentBuild.result = "FAILED"
+    throw e
+  }
+
+  finally {
+    if ("${env.BRANCH_NAME}"=="develop" || "${env.BRANCH_NAME}".startsWith('release') || "${env.BRANCH_NAME}".startsWith('hotfix') || "${env.BRANCH_NAME}"=="master") {
+      stage ('Deploy to Artifactory') {
+        def server = Artifactory.server("${artifactoryServer}")
+        def buildInfo = Artifactory.newBuildInfo()
+
+        // Publish build artifacts
+        server.upload(uploadSpec)
+
+        // Publish build info.
+        server.publishBuildInfo buildInfo
+      }
+
+    //Success or failure, always send notifications
+    notifyBuild(currentBuild.result)
+    }
+  }
+}
+
+def notifyBuild(String buildStatus = 'STARTED') {
+  // build status of null means successful
+  buildStatus =  buildStatus ?: 'SUCCESSFUL'
+
+  // Default values
+  def props = readProperties file: 'project.properties'
+  def techLead = props.techLead
+  def subject = "${buildStatus}: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'"
+  def details = "${buildStatus}: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]': Check console output at ${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]"
+
+  if("${buildStatus}" == 'SUCCESSFUL'){
+    // Send notifications
+      emailext (
+          subject: subject,
+          body: details,
+          to: "${techLead}",
+          recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+        )
+      slackSend (color: '#00FF00', message: "SUCCESSFUL: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
+    }
+    else if("${buildStatus}" == 'STARTED') {
+      emailext (
+          subject: subject,
+          body: details,
+          recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+        )
+        slackSend (color: '#FFFF00', message: "STARTED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
+    }
+    else  {
+      emailext (
+          subject: subject,
+          body: details,
+          recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+        )
+        slackSend (color: '#FF0000', message: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
+    }
+}
